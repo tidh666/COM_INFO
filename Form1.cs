@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO.Ports;
 using System.Linq;
 using System.Windows.Forms;
 
@@ -10,107 +9,259 @@ namespace COM_INFO
 {
     public partial class Form1 : Form
     {
+        private const int TimerIntervalMilliseconds = 5000;
+        private const int BalloonTipTimeoutMilliseconds = 3000;
+        private static readonly TimeSpan NewPortHighlightDuration = TimeSpan.FromMinutes(1);
+        private const string NewPortBalloonTitle = "Nuevo puerto COM detectado";
+        private const string NoPortsText = "Sin puertos COM disponibles";
+        private const string PortsHeader = "Puertos COM:";
+        private const string NewPortSuffix = " [NUEVO]";
+
         private Timer timer;
-        private List<string> currentPorts;
+        private ComPortMonitor monitor;
+        private Dictionary<string, DateTime> recentPorts;
+        private bool exitRequested;
 
         public Form1()
         {
             InitializeComponent();
 
-            // Inicializar el Timer para actualizar la información periódicamente
+            FormClosing += Form1_FormClosing;
+            Shown += Form1_Shown;
+            salirToolStripMenuItem.Click += MenuItemSalir_Click;
+
+            monitor = new ComPortMonitor();
+            monitor.PortsChanged += Monitor_PortsChanged;
+            monitor.Initialize();
+
+            recentPorts = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
             timer = new Timer();
-            timer.Interval = 5000; // Actualiza cada 5 segundos (ajusta el valor según tus necesidades)
+            timer.Interval = TimerIntervalMilliseconds;
             timer.Tick += Timer_Tick;
             timer.Start();
 
-            // Inicializar la lista de puertos actuales
-            currentPorts = GetAvailablePorts().ToList();
-
-            // Agregar un evento para mostrar el menú contextual al hacer clic derecho
-            COM_info.MouseClick += NotifyIcon1_MouseClick;
-
-            // Crear el menú contextual
-            CreateContextMenu();
+            UpdateNotifyIconText(monitor.CurrentPorts);
         }
 
         private void Timer_Tick(object sender, EventArgs e)
         {
-            // Obtener los puertos COM disponibles actualmente
-            List<string> newPorts = GetAvailablePorts().ToList();
-
-            // Comparar los puertos antes y después del cambio
-            var addedPorts = newPorts.Except(currentPorts);
-            var removedPorts = currentPorts.Except(newPorts);
-
-            // Actualizar la lista de puertos actuales
-            currentPorts = newPorts;
-
-            // Mostrar los cambios en el icono de la bandeja del sistema
-            string portInfo = "Puertos COM disponibles:" + Environment.NewLine;
-            portInfo += string.Join(Environment.NewLine, newPorts);
-
-            foreach (string port in addedPorts)
-            {
-                portInfo += " - NUEVO";
-            }
-
-            COM_info.Text = portInfo;
+            monitor.CheckPorts();
+            UpdateNotifyIconText(monitor.CurrentPorts);
         }
 
         private void NotifyIcon1_MouseClick(object sender, MouseEventArgs e)
         {
-            // Mostrar el menú contextual al hacer clic derecho
             if (e.Button == MouseButtons.Right)
             {
                 contextMenuStrip1.Show(Cursor.Position);
             }
-            // Restaurar el formulario al hacer clic izquierdo
-            else if (e.Button == MouseButtons.Left)
-            {
-                //this.WindowState = FormWindowState.Normal;
-                //this.ShowInTaskbar = true;
-            }
-        }
-
-        private void CreateContextMenu()
-        {
-            // Crear el menú contextual
-            contextMenuStrip1 = new ContextMenuStrip();
-
-            // Agregar un elemento de menú "Salir"
-            var menuItemSalir = new ToolStripMenuItem("Salir");
-            menuItemSalir.Click += MenuItemSalir_Click;
-            contextMenuStrip1.Items.Add(menuItemSalir);
-
-            // Asignar el menú contextual al NotifyIcon
-            COM_info.ContextMenuStrip = contextMenuStrip1;
         }
 
         private void MenuItemSalir_Click(object sender, EventArgs e)
         {
-            // Manejar el clic en "Salir" para cerrar la aplicación
-            this.Close();
+            exitRequested = true;
+            Close();
         }
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            // Ocultar el formulario en lugar de cerrarlo
-            if (e.CloseReason == CloseReason.UserClosing)
+            if (!exitRequested && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
-                this.WindowState = FormWindowState.Minimized;
-                this.ShowInTaskbar = false;
+                HideWindow();
+                return;
+            }
+
+            ReleaseRuntimeResources();
+        }
+
+        private void Monitor_PortsChanged(object sender, PortChangeEventArgs e)
+        {
+            RegisterRecentPorts(e.AddedPorts);
+            RemoveRecentPorts(e.RemovedPorts);
+            UpdateNotifyIconText(e.AllPorts);
+
+            if (e.AddedPorts != null && e.AddedPorts.Count > 0)
+            {
+                ShowNewPortsBalloonTip(e.AddedPorts);
             }
         }
 
-        private IEnumerable<string> GetAvailablePorts()
+        private void Form1_Shown(object sender, EventArgs e)
         {
-            return SerialPort.GetPortNames();
+            HideWindow();
+        }
+
+        private void UpdateNotifyIconText(System.Collections.Generic.IReadOnlyList<string> ports)
+        {
+            RemoveExpiredRecentPorts();
+            string text = BuildNotifyIconText(ports, recentPorts);
+
+            if (!string.Equals(COM_info.Text, text, StringComparison.Ordinal))
+            {
+                COM_info.Text = text;
+            }
+        }
+
+        private static string BuildNotifyIconText(System.Collections.Generic.IReadOnlyList<string> ports, IDictionary<string, DateTime> highlightedPorts)
+        {
+            if (ports == null || ports.Count == 0)
+            {
+                return NoPortsText;
+            }
+
+            List<string> lines = new List<string>();
+            lines.Add(PortsHeader);
+
+            foreach (string port in ports)
+            {
+                string line = port;
+
+                if (highlightedPorts != null && highlightedPorts.ContainsKey(port))
+                {
+                    line += NewPortSuffix;
+                }
+
+                lines.Add(line);
+            }
+
+            List<string> visibleLines = new List<string>();
+            int maxLength = 63;
+            int currentLength = 0;
+
+            foreach (string line in lines)
+            {
+                int projectedLength = currentLength;
+
+                if (visibleLines.Count > 0)
+                {
+                    projectedLength += Environment.NewLine.Length;
+                }
+
+                projectedLength += line.Length;
+
+                if (projectedLength > maxLength)
+                {
+                    break;
+                }
+
+                visibleLines.Add(line);
+                currentLength = projectedLength;
+            }
+
+            if (visibleLines.Count == 0)
+            {
+                return NoPortsText;
+            }
+
+            if (visibleLines.Count < lines.Count)
+            {
+                string lastLine = visibleLines[visibleLines.Count - 1];
+                int allowedLineLength = Math.Max(0, maxLength - (currentLength - lastLine.Length) - 3);
+
+                if (lastLine.Length > allowedLineLength)
+                {
+                    lastLine = lastLine.Substring(0, allowedLineLength);
+                }
+
+                visibleLines[visibleLines.Count - 1] = lastLine + "...";
+            }
+
+            return string.Join(Environment.NewLine, visibleLines);
+        }
+
+        private void HideWindow()
+        {
+            WindowState = FormWindowState.Minimized;
+            ShowInTaskbar = false;
+            Hide();
+        }
+
+        private void ShowNewPortsBalloonTip(System.Collections.Generic.IReadOnlyList<string> addedPorts)
+        {
+            string balloonText = string.Join(", ", addedPorts);
+
+            if (string.IsNullOrWhiteSpace(balloonText))
+            {
+                return;
+            }
+
+            COM_info.BalloonTipTitle = NewPortBalloonTitle;
+            COM_info.BalloonTipText = balloonText;
+            COM_info.BalloonTipIcon = ToolTipIcon.Info;
+            COM_info.ShowBalloonTip(BalloonTipTimeoutMilliseconds);
+        }
+
+        private void RegisterRecentPorts(System.Collections.Generic.IReadOnlyList<string> addedPorts)
+        {
+            if (addedPorts == null)
+            {
+                return;
+            }
+
+            DateTime expiresAt = DateTime.Now.Add(NewPortHighlightDuration);
+
+            foreach (string port in addedPorts)
+            {
+                recentPorts[port] = expiresAt;
+            }
+        }
+
+        private void RemoveRecentPorts(System.Collections.Generic.IReadOnlyList<string> removedPorts)
+        {
+            if (removedPorts == null)
+            {
+                return;
+            }
+
+            foreach (string port in removedPorts)
+            {
+                recentPorts.Remove(port);
+            }
+        }
+
+        private void RemoveExpiredRecentPorts()
+        {
+            if (recentPorts.Count == 0)
+            {
+                return;
+            }
+
+            DateTime now = DateTime.Now;
+            List<string> expiredPorts = recentPorts
+                .Where(entry => entry.Value <= now)
+                .Select(entry => entry.Key)
+                .ToList();
+
+            foreach (string port in expiredPorts)
+            {
+                recentPorts.Remove(port);
+            }
+        }
+
+        private void ReleaseRuntimeResources()
+        {
+            if (timer != null)
+            {
+                timer.Stop();
+                timer.Tick -= Timer_Tick;
+                timer.Dispose();
+                timer = null;
+            }
+
+            if (monitor != null)
+            {
+                monitor.PortsChanged -= Monitor_PortsChanged;
+                monitor.Dispose();
+                monitor = null;
+            }
+
+            COM_info.Visible = false;
         }
 
         private void notifyIcon1_MouseDoubleClick(object sender, MouseEventArgs e)
         {
-
         }
     }
 }
