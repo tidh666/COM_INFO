@@ -1,5 +1,5 @@
 #define MyAppName "COM_INFO"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "0.2"
 #define MyAppPublisher "Juan Perona"
 #define MyAppExeName "COM_INFO.exe"
 
