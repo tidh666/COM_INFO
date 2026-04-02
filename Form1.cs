@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Windows.Forms;
 
@@ -9,6 +10,13 @@ namespace COM_INFO
 {
     public partial class Form1 : Form
     {
+        private enum NotificationMode
+        {
+            BalloonTip,
+            Dialog,
+            None
+        }
+
         private const int TimerIntervalMilliseconds = 5000;
         private const int BalloonTipTimeoutMilliseconds = 3000;
         private static readonly TimeSpan NewPortHighlightDuration = TimeSpan.FromMinutes(1);
@@ -16,10 +24,20 @@ namespace COM_INFO
         private const string NoPortsText = "Sin puertos COM disponibles";
         private const string PortsHeader = "Puertos COM:";
         private const string NewPortSuffix = " [NUEVO]";
+        private const string NotificationMenuText = "Notificacion";
+        private const string BalloonNotificationText = "Globo de bandeja";
+        private const string DialogNotificationText = "Ventana emergente";
+        private const string NoNotificationText = "Sin notificacion";
 
         private Timer timer;
         private ComPortMonitor monitor;
         private Dictionary<string, DateTime> recentPorts;
+        private ToolStripMenuItem notificationMenuItem;
+        private ToolStripMenuItem balloonNotificationMenuItem;
+        private ToolStripMenuItem dialogNotificationMenuItem;
+        private ToolStripMenuItem noNotificationMenuItem;
+        private NotificationMode notificationMode;
+        private string notificationModeFilePath;
         private bool exitRequested;
 
         public Form1()
@@ -29,6 +47,15 @@ namespace COM_INFO
             FormClosing += Form1_FormClosing;
             Shown += Form1_Shown;
             salirToolStripMenuItem.Click += MenuItemSalir_Click;
+
+            notificationModeFilePath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "COM_INFO",
+                "notification-mode.txt");
+
+            InitializeNotificationMenu();
+            notificationMode = LoadNotificationMode();
+            UpdateNotificationMenuState();
 
             monitor = new ComPortMonitor();
             monitor.PortsChanged += Monitor_PortsChanged;
@@ -84,7 +111,7 @@ namespace COM_INFO
 
             if (e.AddedPorts != null && e.AddedPorts.Count > 0)
             {
-                ShowNewPortsBalloonTip(e.AddedPorts);
+                ShowNewPortNotification(e.AddedPorts);
             }
         }
 
@@ -180,7 +207,7 @@ namespace COM_INFO
 
         private void ShowNewPortsBalloonTip(System.Collections.Generic.IReadOnlyList<string> addedPorts)
         {
-            string balloonText = string.Join(", ", addedPorts);
+            string balloonText = string.Join(Environment.NewLine, addedPorts);
 
             if (string.IsNullOrWhiteSpace(balloonText))
             {
@@ -191,6 +218,126 @@ namespace COM_INFO
             COM_info.BalloonTipText = balloonText;
             COM_info.BalloonTipIcon = ToolTipIcon.Info;
             COM_info.ShowBalloonTip(BalloonTipTimeoutMilliseconds);
+        }
+
+        private void ShowNewPortsDialog(System.Collections.Generic.IReadOnlyList<string> addedPorts)
+        {
+            string dialogText = string.Join(Environment.NewLine, addedPorts);
+
+            if (string.IsNullOrWhiteSpace(dialogText))
+            {
+                return;
+            }
+
+            MessageBox.Show(dialogText, NewPortBalloonTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void ShowNewPortNotification(System.Collections.Generic.IReadOnlyList<string> addedPorts)
+        {
+            switch (notificationMode)
+            {
+                case NotificationMode.Dialog:
+                    ShowNewPortsDialog(addedPorts);
+                    break;
+
+                case NotificationMode.None:
+                    break;
+
+                default:
+                    ShowNewPortsBalloonTip(addedPorts);
+                    break;
+            }
+        }
+
+        private void InitializeNotificationMenu()
+        {
+            notificationMenuItem = new ToolStripMenuItem(NotificationMenuText);
+            balloonNotificationMenuItem = CreateNotificationModeMenuItem(BalloonNotificationText, NotificationMode.BalloonTip);
+            dialogNotificationMenuItem = CreateNotificationModeMenuItem(DialogNotificationText, NotificationMode.Dialog);
+            noNotificationMenuItem = CreateNotificationModeMenuItem(NoNotificationText, NotificationMode.None);
+
+            notificationMenuItem.DropDownItems.Add(balloonNotificationMenuItem);
+            notificationMenuItem.DropDownItems.Add(dialogNotificationMenuItem);
+            notificationMenuItem.DropDownItems.Add(noNotificationMenuItem);
+
+            contextMenuStrip1.Items.Insert(0, new ToolStripSeparator());
+            contextMenuStrip1.Items.Insert(0, notificationMenuItem);
+        }
+
+        private ToolStripMenuItem CreateNotificationModeMenuItem(string text, NotificationMode mode)
+        {
+            ToolStripMenuItem menuItem = new ToolStripMenuItem(text);
+            menuItem.Tag = mode;
+            menuItem.Click += NotificationModeMenuItem_Click;
+            return menuItem;
+        }
+
+        private void NotificationModeMenuItem_Click(object sender, EventArgs e)
+        {
+            ToolStripMenuItem menuItem = sender as ToolStripMenuItem;
+
+            if (menuItem == null || !(menuItem.Tag is NotificationMode))
+            {
+                return;
+            }
+
+            notificationMode = (NotificationMode)menuItem.Tag;
+            UpdateNotificationMenuState();
+            SaveNotificationMode();
+        }
+
+        private void UpdateNotificationMenuState()
+        {
+            if (balloonNotificationMenuItem == null)
+            {
+                return;
+            }
+
+            balloonNotificationMenuItem.Checked = notificationMode == NotificationMode.BalloonTip;
+            dialogNotificationMenuItem.Checked = notificationMode == NotificationMode.Dialog;
+            noNotificationMenuItem.Checked = notificationMode == NotificationMode.None;
+        }
+
+        private NotificationMode LoadNotificationMode()
+        {
+            try
+            {
+                if (!File.Exists(notificationModeFilePath))
+                {
+                    return NotificationMode.BalloonTip;
+                }
+
+                string value = File.ReadAllText(notificationModeFilePath).Trim();
+                NotificationMode loadedMode;
+
+                if (Enum.TryParse(value, true, out loadedMode))
+                {
+                    return loadedMode;
+                }
+            }
+            catch
+            {
+            }
+
+            return NotificationMode.BalloonTip;
+        }
+
+        private void SaveNotificationMode()
+        {
+            try
+            {
+                string directoryPath = Path.GetDirectoryName(notificationModeFilePath);
+
+                if (!Directory.Exists(directoryPath))
+                {
+                    Directory.CreateDirectory(directoryPath);
+                }
+
+                File.WriteAllText(notificationModeFilePath, notificationMode.ToString());
+            }
+            catch
+            {
+            }
         }
 
         private void RegisterRecentPorts(System.Collections.Generic.IReadOnlyList<string> addedPorts)
