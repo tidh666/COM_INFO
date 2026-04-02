@@ -2,7 +2,7 @@
 
 Monitor de puertos COM para Windows que funciona desde la bandeja del sistema.
 
-Version actual: `0.2`
+Version actual: `0.2.1`
 
 ## Hace esto
 
